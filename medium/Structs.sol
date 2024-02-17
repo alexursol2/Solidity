@@ -37,7 +37,7 @@ contract StructExamples {
         cars.push(Car({model: model, year: year, owner: msg.sender}));
     }
 
-    function get(uint256 _index)
+    function get(uint256 index)
         external
         view
         returns (string memory model, uint256 year, address owner)
