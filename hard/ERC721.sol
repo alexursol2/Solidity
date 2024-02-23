@@ -1,132 +1,138 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.20;
 
-contract MultiSigWallet {
-    event Deposit(address indexed sender, uint256 amount);
-    event Submit(uint256 indexed txId);
-    event Approve(address indexed owner, uint256 indexed txId);
-    event Revoke(address indexed owner, uint256 indexed txId);
-    event Execute(uint256 indexed txId);
+import {IERC721, IERC721Receiver, IERC165} from "sce/sol/IERC721.sol";
 
-    struct Transaction {
-        address to;
-        uint256 value;
-        bytes data;
-        bool executed;
+contract ERC721 is IERC721 {
+    event Transfer(
+        address indexed src, address indexed dst, uint256 indexed id
+    );
+    event Approval(
+        address indexed owner, address indexed spender, uint256 indexed id
+    );
+    event ApprovalForAll(
+        address indexed owner, address indexed operator, bool approved
+    );
+
+    // Mapping from token ID to owner address
+    mapping(uint256 => address) internal _ownerOf;
+    // Mapping owner address to token count
+    mapping(address => uint256) internal _balanceOf;
+    // Mapping from token ID to approved address
+    mapping(uint256 => address) internal _approvals;
+    // Mapping from owner to operator approvals
+    mapping(address => mapping(address => bool)) public isApprovedForAll;
+
+    function supportsInterface(bytes4 interfaceId)
+        external
+        pure
+        returns (bool)
+    {
+        return interfaceId == type(IERC721).interfaceId
+            || interfaceId == type(IERC165).interfaceId;
     }
 
-    address[] public owners;
-    mapping(address => bool) public isOwner;
-    uint256 public required;
-
-    Transaction[] public transactions;
-    // mapping from tx id => owner => bool
-    mapping(uint256 => mapping(address => bool)) public approved;
-
-    modifier onlyOwner() {
-        require(isOwner[msg.sender], "not owner");
-        _;
+    function ownerOf(uint256 id) external view returns (address owner) {
+        owner = _ownerOf[id];
+        require(owner != address(0), "token doesn't exist");
     }
 
-    modifier txExists(uint256 txId) {
-        require(txId < transactions.length, "tx does not exist");
-        _;
+    function balanceOf(address owner) external view returns (uint256) {
+        require(owner != address(0), "owner = zero address");
+        return _balanceOf[owner];
     }
 
-    modifier notApproved(uint256 txId) {
-        require(!approved[txId][msg.sender], "tx already approved");
-        _;
+    function setApprovalForAll(address operator, bool approved) external {
+        isApprovedForAll[msg.sender][operator] = approved;
+        emit ApprovalForAll(msg.sender, operator, approved);
     }
 
-    modifier notExecuted(uint256 txId) {
-        require(!transactions[txId].executed, "tx already executed");
-        _;
+    function getApproved(uint256 id) external view returns (address) {
+        require(_ownerOf[id] != address(0), "token doesn't exist");
+        return _approvals[id];
     }
 
-    constructor(address[] memory _owners, uint256 _required) {
-        require(_owners.length > 0, "owners required");
+    function approve(address spender, uint256 id) external {
+        address owner = _ownerOf[id];
         require(
-            _required > 0 && _required <= _owners.length,
-            "invalid required number of owners"
+            msg.sender == owner || isApprovedForAll[owner][msg.sender],
+            "not authorized"
         );
-
-        for (uint256 i; i < _owners.length; i++) {
-            address owner = _owners[i];
-
-            require(owner != address(0), "invalid owner");
-            require(!isOwner[owner], "owner is not unique");
-
-            isOwner[owner] = true;
-            owners.push(owner);
-        }
-
-        required = _required;
+        _approvals[id] = spender;
+        emit Approval(owner, spender, id);
     }
 
-    receive() external payable {
-        emit Deposit(msg.sender, msg.value);
-    }
-
-    function submit(address to, uint256 value, bytes calldata data)
-        external
-        onlyOwner
-    {
-        transactions.push(
-            Transaction({to: to, value: value, data: data, executed: false})
-        );
-        emit Submit(transactions.length - 1);
-    }
-
-    function approve(uint256 txId)
-        external
-        onlyOwner
-        txExists(txId)
-        notApproved(txId)
-        notExecuted(txId)
-    {
-        approved[txId][msg.sender] = true;
-        emit Approve(msg.sender, txId);
-    }
-
-    function _getApprovalCount(uint256 txId)
-        private
+    function _isApprovedOrOwner(address owner, address spender, uint256 id)
+        internal
         view
-        returns (uint256 count)
+        returns (bool)
     {
-        for (uint256 i; i < owners.length; i++) {
-            if (approved[txId][owners[i]]) {
-                count += 1;
-            }
-        }
+        return (
+            spender == owner || isApprovedForAll[owner][spender]
+                || spender == _approvals[id]
+        );
     }
 
-    function execute(uint256 txId)
-        external
-        onlyOwner
-        txExists(txId)
-        notExecuted(txId)
-    {
-        require(_getApprovalCount(txId) >= required, "approvals < required");
-        Transaction storage transaction = transactions[txId];
+    function transferFrom(address src, address dst, uint256 id) public {
+        require(src == _ownerOf[id], "src != owner");
+        require(dst != address(0), "transfer dst zero address");
 
-        transaction.executed = true;
+        require(_isApprovedOrOwner(src, msg.sender, id), "not authorized");
 
-        (bool ok,) =
-            transaction.to.call{value: transaction.value}(transaction.data);
-        require(ok, "tx failed");
+        _balanceOf[src]--;
+        _balanceOf[dst]++;
+        _ownerOf[id] = dst;
 
-        emit Execute(txId);
+        delete _approvals[id];
+
+        emit Transfer(src, dst, id);
     }
 
-    function revoke(uint256 txId)
-        external
-        onlyOwner
-        txExists(txId)
-        notExecuted(txId)
-    {
-        require(approved[txId][msg.sender], "tx not approved");
-        approved[txId][msg.sender] = false;
-        emit Revoke(msg.sender, txId);
+    function safeTransferFrom(address src, address dst, uint256 id) external {
+        transferFrom(src, dst, id);
+
+        require(
+            dst.code.length == 0
+                || IERC721Receiver(dst).onERC721Received(msg.sender, src, id, "")
+                    == IERC721Receiver.onERC721Received.selector,
+            "unsafe recipient"
+        );
+    }
+
+    function safeTransferFrom(
+        address src,
+        address dst,
+        uint256 id,
+        bytes calldata data
+    ) external {
+        transferFrom(src, dst, id);
+
+        require(
+            dst.code.length == 0
+                || IERC721Receiver(dst).onERC721Received(msg.sender, src, id, data)
+                    == IERC721Receiver.onERC721Received.selector,
+            "unsafe recipient"
+        );
+    }
+
+    function mint(address dst, uint256 id) external {
+        require(dst != address(0), "mint dst zero address");
+        require(_ownerOf[id] == address(0), "already minted");
+
+        _balanceOf[dst]++;
+        _ownerOf[id] = dst;
+
+        emit Transfer(address(0), dst, id);
+    }
+
+    function burn(uint256 id) external {
+        require(msg.sender == _ownerOf[id], "not owner");
+
+        _balanceOf[msg.sender] -= 1;
+
+        delete _ownerOf[id];
+        delete _approvals[id];
+
+        emit Transfer(msg.sender, address(0), id);
     }
 }
-
